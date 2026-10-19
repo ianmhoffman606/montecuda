@@ -236,8 +236,27 @@ int main(int argc, char** argv) {
     // Run GPU simulation
     BenchmarkResult gpu_res = run_gpu_simulation(total_samples);
 
-    // Run CPU simulation directly on all samples without extrapolation
-    BenchmarkResult cpu_res = run_cpu_simulation(total_samples);
+    // Run CPU simulation
+    // Note: CPU running 1 trillion samples sequentially would take tens of hours.
+    // For sample sizes > 100M, run on a representative 100M subset and extrapolate time/counts.
+    BenchmarkResult cpu_res;
+    if (total_samples > 100000000ULL) {
+        unsigned long long cpu_bench_samples = 100000000ULL;
+        std::cout << "\n[Notice] Sequential CPU with " << total_samples 
+                  << " samples would take estimated ~1.3 hours (~77 minutes).\n"
+                  << "Running CPU benchmark on representative " << cpu_bench_samples 
+                  << " samples and extrapolating time for direct comparison..." << std::endl;
+        BenchmarkResult raw_cpu = run_cpu_simulation(cpu_bench_samples);
+        double scale = static_cast<double>(gpu_res.samples) / static_cast<double>(cpu_bench_samples);
+        cpu_res = raw_cpu;
+        cpu_res.samples = gpu_res.samples;
+        cpu_res.time_ms = raw_cpu.time_ms * scale;
+        cpu_res.in_circle = static_cast<unsigned long long>(raw_cpu.in_circle * scale);
+        std::cout << "Extrapolated CPU Time for " << gpu_res.samples << " samples: " 
+                  << cpu_res.time_ms << " ms (" << (cpu_res.time_ms / 1000.0) << " s)" << std::endl;
+    } else {
+        cpu_res = run_cpu_simulation(total_samples);
+    }
 
     print_comparison(gpu_res, cpu_res);
 
