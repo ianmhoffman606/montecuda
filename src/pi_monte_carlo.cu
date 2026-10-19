@@ -4,6 +4,8 @@
 #include <cuda_runtime.h> // for cuda functions
 #include <time.h> // for time(NULL)
 #include <cmath> // for std::abs and std::acos
+#include <chrono>
+#include <random>
 #include <stdexcept> // for std::invalid_argument
 #include <string> // for std::stoull
 #include <curand_kernel.h> // for curand functions
@@ -65,17 +67,15 @@ __global__ void estimate_pi_kernel(unsigned long long seed, unsigned long long s
     }
 }
 
-int main(int argc, char** argv) {
-    unsigned long long total_samples = 1ULL << 30; // default total samples (~1 billion)
-    if (argc > 1) {
-        try {
-            total_samples = std::stoull(argv[1]);
-        } catch (const std::invalid_argument& ia) {
-            std::cerr << "Invalid argument: " << argv[1] << ". Please provide a number." << std::endl;
-            return 1;
-        }
-    }
+struct BenchmarkResult {
+    unsigned long long samples;
+    unsigned long long in_circle;
+    double time_ms;
+    double pi_estimate;
+    double error;
+};
 
+BenchmarkResult run_gpu_simulation(unsigned long long total_samples) {
     // get device properties
     int device_id;
     CUDA_CHECK(cudaGetDevice(&device_id));
@@ -91,10 +91,13 @@ int main(int argc, char** argv) {
     unsigned long long samples_per_thread = (total_samples + total_threads - 1) / total_threads; 
     unsigned long long actual_total_samples = samples_per_thread * total_threads;
 
-    std::cout << "GPU: " << props.name << std::endl;
-    std::cout << "Threads per block: " << THREADS_PER_BLOCK << std::endl;
-    std::cout << "Number of blocks: " << num_blocks << std::endl;
-    std::cout << "Samples per thread: " << samples_per_thread << std::endl;
+    std::cout << "============================================================" << std::endl;
+    std::cout << "  GPU (CUDA) -- Parallelized" << std::endl;
+    std::cout << "============================================================" << std::endl;
+    std::cout << "GPU:                     " << props.name << std::endl;
+    std::cout << "Threads per block:       " << THREADS_PER_BLOCK << std::endl;
+    std::cout << "Number of blocks:        " << num_blocks << std::endl;
+    std::cout << "Samples per thread:      " << samples_per_thread << std::endl;
     std::cout << "Total samples requested: " << total_samples << std::endl;
     std::cout << "Total samples actual:    " << actual_total_samples << std::endl;
 
@@ -109,7 +112,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventCreate(&stop));
 
     // seed for random number generation
-    unsigned long long seed = time(NULL);
+    unsigned long long seed = (unsigned long long)time(NULL);
 
     // record start time, launch kernel, record stop time
     CUDA_CHECK(cudaEventRecord(start));
@@ -131,22 +134,112 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventSynchronize(stop)); // wait for stop event to complete
     CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
 
-    // calculate pi estimate and error
-    double pi_estimate = 4.0 * static_cast<double>(total_in_circle) / static_cast<double>(actual_total_samples);
-    double actual_pi = std::acos(-1.0);
-
-    // print results
-    std::cout << std::fixed << std::setprecision(12);
-    std::cout << "\nPoints in circle: " << total_in_circle << std::endl;
-    std::cout << "Kernel execution time: " << milliseconds << " ms" << std::endl;
-    std::cout << "Estimated Pi = " << pi_estimate << std::endl;
-    std::cout << "Actual Pi    = " << actual_pi << std::endl;
-    std::cout << "Error        = " << std::abs(pi_estimate - actual_pi) << std::endl; 
-
     // clean up cuda resources
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
     CUDA_CHECK(cudaFree(d_block_results));
+
+    double actual_pi = std::acos(-1.0);
+    double pi_estimate = 4.0 * static_cast<double>(total_in_circle) / static_cast<double>(actual_total_samples);
+    double error = std::abs(pi_estimate - actual_pi);
+
+    std::cout << std::fixed << std::setprecision(12);
+    std::cout << "\nPoints in circle:      " << total_in_circle << std::endl;
+    std::cout << "Kernel execution time: " << milliseconds << " ms" << std::endl;
+    std::cout << "Estimated Pi =         " << pi_estimate << std::endl;
+    std::cout << "Actual Pi    =         " << actual_pi << std::endl;
+    std::cout << "Error        =         " << error << std::endl;
+
+    return {actual_total_samples, total_in_circle, (double)milliseconds, pi_estimate, error};
+}
+
+BenchmarkResult run_cpu_simulation(unsigned long long total_samples) {
+    std::cout << "\n============================================================" << std::endl;
+    std::cout << "  CPU -- Single-threaded (No parallelization)" << std::endl;
+    std::cout << "============================================================" << std::endl;
+    std::cout << "Total samples:           " << total_samples << std::endl;
+
+    std::mt19937_64 rng(static_cast<unsigned long long>(std::time(nullptr)));
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    unsigned long long total_in_circle = 0;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (unsigned long long i = 0; i < total_samples; ++i) {
+        float x = dist(rng);
+        float y = dist(rng);
+
+        if (x * x + y * y <= 1.0f) {
+            total_in_circle++;
+        }
+    }
+
+    auto stop = std::chrono::high_resolution_clock::now();
+    double milliseconds = std::chrono::duration<double, std::milli>(stop - start).count();
+
+    double actual_pi = std::acos(-1.0);
+    double pi_estimate = 4.0 * static_cast<double>(total_in_circle) / static_cast<double>(total_samples);
+    double error = std::abs(pi_estimate - actual_pi);
+
+    std::cout << std::fixed << std::setprecision(12);
+    std::cout << "\nPoints in circle:      " << total_in_circle << std::endl;
+    std::cout << "Execution time:        " << milliseconds << " ms" << std::endl;
+    std::cout << "Estimated Pi =         " << pi_estimate << std::endl;
+    std::cout << "Actual Pi    =         " << actual_pi << std::endl;
+    std::cout << "Error        =         " << error << std::endl;
+
+    return {total_samples, total_in_circle, milliseconds, pi_estimate, error};
+}
+
+void print_comparison(const BenchmarkResult& gpu, const BenchmarkResult& cpu) {
+    double speedup = (gpu.time_ms > 0.0) ? (cpu.time_ms / gpu.time_ms) : 0.0;
+
+    std::cout << "\n============================================================" << std::endl;
+    std::cout << "  COMPARISON: GPU vs CPU" << std::endl;
+    std::cout << "============================================================" << std::endl;
+    std::cout << std::left << std::setw(24) << "Metric" 
+              << std::right << std::setw(18) << "GPU (CUDA)" 
+              << std::setw(18) << "CPU (Single)" << std::endl;
+    std::cout << "  --------------------------------------------------------" << std::endl;
+    std::cout << std::left << std::setw(24) << "Samples"
+              << std::right << std::setw(18) << gpu.samples
+              << std::setw(18) << cpu.samples << std::endl;
+    std::cout << std::left << std::setw(24) << "Time (ms)"
+              << std::right << std::fixed << std::setprecision(2) << std::setw(18) << gpu.time_ms
+              << std::setw(18) << cpu.time_ms << std::endl;
+    std::cout << std::left << std::setw(24) << "Estimated Pi"
+              << std::right << std::fixed << std::setprecision(10) << std::setw(18) << gpu.pi_estimate
+              << std::setw(18) << cpu.pi_estimate << std::endl;
+    std::cout << std::left << std::setw(24) << "Error"
+              << std::right << std::fixed << std::setprecision(10) << std::setw(18) << gpu.error
+              << std::setw(18) << cpu.error << std::endl;
+    std::cout << std::left << std::setw(24) << "Points in circle"
+              << std::right << std::setw(18) << gpu.in_circle
+              << std::setw(18) << cpu.in_circle << std::endl;
+
+    std::cout << "\n  >>> GPU speedup: " << std::fixed << std::setprecision(2) << speedup << "x faster than CPU <<<\n" << std::endl;
+}
+
+int main(int argc, char** argv) {
+    // 1 trillion samples default: 1,000,000,000,000 ULL
+    unsigned long long total_samples = 1000000000000ULL;
+    if (argc > 1) {
+        try {
+            total_samples = std::stoull(argv[1]);
+        } catch (const std::invalid_argument& ia) {
+            std::cerr << "Invalid argument: " << argv[1] << ". Please provide a number." << std::endl;
+            return 1;
+        }
+    }
+
+    // Run GPU simulation
+    BenchmarkResult gpu_res = run_gpu_simulation(total_samples);
+
+    // Run CPU simulation directly on all samples without extrapolation
+    BenchmarkResult cpu_res = run_cpu_simulation(total_samples);
+
+    print_comparison(gpu_res, cpu_res);
 
     return 0;
 }
